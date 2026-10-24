@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const TIMEOUT_MS = 180_000;
+const TIMEOUT_MS = 300_000;
 
 const BACKENDS = {
   claude: {
