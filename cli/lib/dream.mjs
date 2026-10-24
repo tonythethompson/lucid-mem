@@ -4,9 +4,11 @@ import {
   commit,
   ensureRepo,
   git,
+  isExpired,
   numFlag,
   withLock,
 } from './core.mjs';
+import { backfillIds } from './ids.mjs';
 
 const out = (s = '') => process.stdout.write(s + '\n');
 const err = (s) => process.stderr.write(s + '\n');
@@ -129,6 +131,7 @@ export function analyze(home, { staleDays = 90 } = {}) {
   const stale = entries.filter(
     (e) => !e.archived && e.date && e.date < cutoff
   );
+  const expired = entries.filter((e) => !e.archived && isExpired(e.raw));
   const noDate = entries.filter((e) => !e.archived && !e.date).length;
 
   const filesNoExt = files.map((f) => f.replace(/\.md$/, ''));
@@ -165,6 +168,7 @@ export function analyze(home, { staleDays = 90 } = {}) {
     stale: stale.map(
       (e) => `${e.file}:${e.line + 1} (last: ${e.date})`
     ),
+    expired: expired.map((e) => `${e.file}:${e.line + 1}`),
     entriesWithoutDate: noDate,
     deadIndexLinks: deadLinks,
     unindexedFiles: unindexed,
@@ -235,6 +239,7 @@ export function cmdDream(flags) {
   report.possibleDups.forEach(([a, b]) => out(`    - ${a}  ~  ${b}`));
   out(`  stale (>${staleDays}d)      : ${report.stale.length}`);
   report.stale.forEach((e) => out(`    - ${e}`));
+  out(`  expired state      : ${report.expired.length}`);
   out(`  dead index links   : ${report.deadIndexLinks.length}`);
   report.deadIndexLinks.forEach((l) => out(`    - [[${l}]]`));
   out(`  unindexed files    : ${report.unindexedFiles.length}`);
@@ -263,8 +268,13 @@ export function cmdDream(flags) {
     const lines = fs.readFileSync(abs, 'utf8').split(/\r?\n/);
     const keep = [];
     let removed = 0;
+    let expiredRemoved = 0;
     for (const l of lines) {
       if (l.trim().startsWith('- ') && !l.includes('[[')) {
+        if (isExpired(l)) {
+          expiredRemoved++;
+          continue;
+        }
         const n = bulletText(l);
         if (seen.has(n)) {
           removed++;
@@ -274,11 +284,19 @@ export function cmdDream(flags) {
       }
       keep.push(l);
     }
-    if (removed) {
+    if (removed || expiredRemoved) {
       atomicWrite(abs, keep.join('\n').replace(/\n{3,}/g, '\n\n'));
       touched.add(rel);
-      changed.push(`${rel}: removed ${removed} duplicate(s)`);
+      if (removed) changed.push(`${rel}: removed ${removed} duplicate(s)`);
+      if (expiredRemoved)
+        changed.push(`${rel}: dropped ${expiredRemoved} expired state entr${expiredRemoved === 1 ? 'y' : 'ies'}`);
     }
+  }
+
+  const ids = backfillIds(home);
+  if (ids.n) {
+    ids.touched.forEach((f) => touched.add(f));
+    changed.push(`assigned ids to ${ids.n} entr${ids.n === 1 ? 'y' : 'ies'}`);
   }
 
   // prune dead index links + index unindexed files

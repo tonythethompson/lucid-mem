@@ -292,3 +292,20 @@ export function projectEntry(cfg, { slug, name }) {
   }
   return null;
 }
+
+// Entry kinds. `state` is session-scoped (what is open, what was just
+// committed) and expires; everything else is durable knowledge.
+export const KINDS = ['pitfall', 'decision', 'preference', 'fact', 'howto', 'state'];
+export const STATE_TTL_DAYS = 2;
+
+export const addDays = (days, from = new Date()) =>
+  new Date(from.getTime() + days * 864e5).toISOString().slice(0, 10);
+
+export const entryKind = (line) =>
+  (String(line).match(/kind:\s*([a-z-]+)/) || [])[1] || null;
+
+// An entry is expired when its expires: date is before `now` (YYYY-MM-DD).
+export const isExpired = (line, now = today()) => {
+  const d = (String(line).match(/expires:\s*(\d{4}-\d{2}-\d{2})/) || [])[1];
+  return !!d && d < now;
+};
