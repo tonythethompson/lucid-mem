@@ -115,3 +115,71 @@ test('add --project routes to projects/<slug>.md', () => {
   assert.match(files[0], /^myproj-[0-9a-f]{6}\.md$/);
   assert.ok(read(path.join(projDir, files[0])).includes('pnpm workspaces'));
 });
+
+test('--kind state gets an expiry; expired entries drop from context and dream --fix', () => {
+  const amrHome = tmpdir();
+  run(['ensure'], { amrHome });
+  const r = run(['add', 'PR 12 is open', '--kind', 'state'], { amrHome });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /session state/);
+  const mem = path.join(amrHome, 'MEMORY.md');
+  assert.match(read(mem), /kind: state; expires: \d{4}-\d{2}-\d{2}/);
+  assert.match(run(['context'], { amrHome }).stdout, /PR 12 is open/);
+  // backdate the expiry
+  fs.writeFileSync(
+    mem,
+    read(mem).replace(/expires: \d{4}-\d{2}-\d{2}/, 'expires: 2020-01-01')
+  );
+  assert.doesNotMatch(run(['context'], { amrHome }).stdout, /PR 12 is open/);
+  assert.match(run(['search', 'PR 12'], { amrHome }).stdout, /PR 12 is open/);
+  const d = run(['dream', '--fix'], { amrHome });
+  assert.match(d.stdout, /dropped 1 expired state entry/);
+  assert.doesNotMatch(read(mem), /PR 12 is open/);
+});
+
+test('unknown --kind is rejected', () => {
+  const amrHome = tmpdir();
+  run(['ensure'], { amrHome });
+  const r = run(['add', 'x thing', '--kind', 'bogus'], { amrHome });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /unknown kind/);
+});
+
+test('entries get ids; update and supersede address them by id', () => {
+  const amrHome = tmpdir();
+  run(['ensure'], { amrHome });
+  const a = run(['add', 'uses tabs for indentation'], { amrHome });
+  const id = a.stdout.match(/\[id ([0-9a-f]{4})\]/)?.[1];
+  assert.ok(id, a.stdout);
+  const u = run(['update', id, 'uses two-space indentation'], { amrHome });
+  assert.equal(u.status, 0, u.stderr);
+  assert.match(u.stdout, new RegExp(`\[id ${id}\]`));
+  const mem = path.join(amrHome, 'MEMORY.md');
+  assert.match(read(mem), new RegExp(`two-space indentation.*id: ${id}`));
+  assert.doesNotMatch(read(mem), /tabs for indentation/);
+  const s = run(['supersede', id, 'uses four-space indentation'], { amrHome });
+  assert.equal(s.status, 0, s.stderr);
+  assert.match(read(mem), /four-space indentation.*supersedes: /);
+  assert.doesNotMatch(read(mem), /two-space/);
+  assert.match(
+    read(path.join(amrHome, 'archive', 'superseded.md')),
+    /two-space indentation/
+  );
+  assert.notEqual(run(['update', 'zzzz1', 'x y'], { amrHome }).status, 0);
+});
+
+test('ids backfills legacy entries and keeps ids unique', () => {
+  const amrHome = tmpdir();
+  run(['ensure'], { amrHome });
+  const mem = path.join(amrHome, 'MEMORY.md');
+  fs.writeFileSync(
+    mem,
+    '# Memory\n\n- legacy one [added: 2026-01-01]\n- legacy two\n\n## Index\n'
+  );
+  const r = run(['ids'], { amrHome });
+  assert.match(r.stdout, /assigned ids to 2 entries/);
+  const found = [...read(mem).matchAll(/id: ([0-9a-f]{4})/g)].map((m) => m[1]);
+  assert.equal(found.length, 2);
+  assert.notEqual(found[0], found[1]);
+  assert.match(run(['ids'], { amrHome }).stdout, /already have ids/);
+});

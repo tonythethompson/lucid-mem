@@ -117,3 +117,24 @@ test('outside context pools latest project entries; private and noglobal exclude
   assert.ok(!r.stdout.includes('pc secret fact'));
   assert.ok(!r.stdout.includes('pd quiet fact'));
 });
+
+test('context ranks by kind/recency within a budget; search usage boosts entries', () => {
+  const home = tmpdir();
+  const run0 = (args) => run(args, { amrHome: home });
+  run0(['ensure']);
+  const mem = path.join(home, 'MEMORY.md');
+  const rows = [];
+  for (let i = 0; i < 10; i++)
+    rows.push(`- old filler fact number ${i} about nothing much at all [added: 2025-01-01; kind: fact; id: a00${i}]`);
+  rows.push('- When CI flakes, re-run once, because runners are flaky [added: 2026-10-20; kind: pitfall; id: b001]');
+  fs.writeFileSync(mem, `# Memory\n\n${rows.join('\n')}\n\n## Index\n`);
+  const tight = run0(['context', '--budget', '10']).stdout;
+  assert.match(tight, /When CI flakes/);
+  assert.match(tight, /lower-ranked entries omitted/);
+  assert.equal((tight.match(/old filler fact/g) || []).length, 2);
+  // usage boost: searching for one old entry should lift it above its peers
+  run0(['search', 'number 7']);
+  const after = run0(['context', '--budget', '10']).stdout;
+  assert.match(after, /number 7/);
+  assert.match(run0(['context', '--full']).stdout, /number 0/);
+});

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { read, run, tmpdir } from './helpers.mjs';
+import { initRepo, read, run, tmpdir } from './helpers.mjs';
 
 function setup() {
   const amrHome = tmpdir();
@@ -124,24 +124,49 @@ test('judge samples the unflagged pool and extrapolates the miss rate', () => {
   assert.match(pending, /deploys happen fridays/);
 });
 
-test('reflect blocks the first stop with a save reminder, allows the second', () => {
+function workTranscript(dir, n) {
+  const file = path.join(dir, 'work.jsonl');
+  const row = {
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', name: 'Edit', input: {} }] },
+  };
+  fs.writeFileSync(file, Array(n).fill(JSON.stringify(row)).join('\n'));
+  return file;
+}
+
+test('reflect stays quiet without real work, blocks once after it, then rate-limits', () => {
   const { amrHome, fakeHome } = setup();
-  const r1 = run(['reflect'], {
-    amrHome,
-    fakeHome,
-    input: JSON.stringify({ session_id: 's1', stop_hook_active: false }),
-  });
-  assert.equal(r1.status, 0, r1.stderr);
-  const j = JSON.parse(r1.stdout);
+  const hook = (payload) =>
+    run(['reflect'], {
+      amrHome,
+      fakeHome,
+      env: { AMR_REFLECT: 'block' },
+      input: JSON.stringify(payload),
+    });
+  const sid = `s-${path.basename(fakeHome)}`;
+  const quiet = hook({ session_id: sid, transcript_path: workTranscript(fakeHome, 2) });
+  assert.equal(quiet.stdout, '');
+  const t = workTranscript(fakeHome, 7);
+  const j = JSON.parse(hook({ session_id: sid, transcript_path: t }).stdout);
   assert.equal(j.decision, 'block');
   assert.match(j.reason, /amr add/);
-  const r2 = run(['reflect'], {
-    amrHome,
-    fakeHome,
-    input: JSON.stringify({ session_id: 's1', stop_hook_active: true }),
+  assert.equal(hook({ session_id: sid, transcript_path: t }).stdout, '');
+  assert.equal(
+    hook({ session_id: sid, stop_hook_active: true, transcript_path: t }).stdout,
+    ''
+  );
+});
+
+test('add --project "text" keeps the text; episodic entries get a warning', () => {
+  const { amrHome, fakeHome } = setup();
+  const repo = initRepo(tmpdir());
+  const r = run(['add', '--project', 'PR #788 open, commit 1f06cc1b not pushed'], {
+    amrHome, fakeHome, cwd: repo,
   });
-  assert.equal(r2.status, 0, r2.stderr);
-  assert.equal(r2.stdout, '');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /saved to projects\//);
+  assert.match(r.stderr, /session state/);
+  assert.match(r.stderr, /commit SHA/);
 });
 
 test('a failing judge falls back to deterministic results', () => {
@@ -194,3 +219,37 @@ function readLines(file) {
     .split('\n')
     .filter(Boolean);
 }
+
+test('reflect-run saves judge entries, skipping episodic ones', () => {
+  const { amrHome, fakeHome } = setup();
+  const repo = initRepo(tmpdir());
+  const transcript = path.join(fakeHome, 'convo.jsonl');
+  fs.writeFileSync(
+    transcript,
+    JSON.stringify({ type: 'user', message: { content: 'ci flaked again' } })
+  );
+  const judge = path.join(fakeHome, 'good-judge.mjs');
+  fs.writeFileSync(
+    judge,
+    'console.log(JSON.stringify([' +
+      '{text:"When CI flakes, re-run once before debugging, because runners are flaky",project:true},' +
+      '{text:"PR #788 open, commit 1f06cc1b not pushed",project:true}]))'
+  );
+  const payload = path.join(fakeHome, 'payload.json');
+  fs.writeFileSync(
+    payload,
+    JSON.stringify({ transcript_path: transcript, cwd: repo })
+  );
+  const r = run(['reflect-run', payload], {
+    amrHome,
+    fakeHome,
+    env: { AMR_JUDGE_CMD: `"${process.execPath}" "${judge}"`, AMR_REFLECT_JUDGE: 'env' },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const files = fs.readdirSync(path.join(amrHome, 'projects'));
+  assert.equal(files.length, 1);
+  const body = read(path.join(amrHome, 'projects', files[0]));
+  assert.match(body, /re-run once before debugging/);
+  assert.doesNotMatch(body, /PR #788/);
+  assert.equal(r.stdout, '');
+});

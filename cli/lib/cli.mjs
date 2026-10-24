@@ -14,10 +14,13 @@ import {
   cmdSearch,
   cmdSync,
   cmdUnlink,
+  cmdUsed,
   cmdUpdate,
 } from './commands.mjs';
 import { cmdDiscover } from './discover.mjs';
 import { cmdDream } from './dream.mjs';
+import { cmdReflectRun } from './reflect.mjs';
+import { cmdIds, cmdSupersede } from './ids.mjs';
 import { cmdHarvest } from './harvest.mjs';
 import { cmdCoverage } from './coverage.mjs';
 import { cmdDoctor, cmdInstall, cmdUninstall } from './install.mjs';
@@ -28,9 +31,12 @@ const USAGE = `amr: agent memory CLI (lucid-mem)
 usage: amr <command> [args] [flags]
 
   ensure                        create/verify the memory repo ($AMR_HOME, default ~/agent-memory)
-  context [dir]                 session digest: project-scoped inside a known repo; global + pooled projects outside
+  context [dir] [--budget N]    ranked session digest (default 6000 chars; --full ignores): project-scoped inside a known repo; global + pooled projects outside
   add "text"                    save a memory entry
-  update "match" "text"         replace an existing entry in place
+  update <id|"match"> "text"   replace an entry in place; ids look like a3f9 (shown in entry meta)
+  supersede <id> ["text"]       retire an entry to archive/superseded.md, optionally with a replacement
+  used <id...>                  mark entries that helped (boosts them in context ranking)
+  ids                           assign ids to entries that lack them
   search "term"                 grep all memory files
   index                         rebuild MEMORY.md index from files on disk
   link <name...> [--for <p>]    auto-attach other repos' memories to this repo's sessions
@@ -44,19 +50,27 @@ usage: amr <command> [args] [flags]
   harvest [--days N] [--json] [--extract] [--max N] [--min C]   list transcripts; --extract streams normalized user messages
   discover [--days N] [--min N] [--json]   rank repos by transcript mentions; shows memory coverage + suggested links
   coverage [--days N] [--json] [--no-log] [--judge claude|codex|env]  save-rate metric: durable transcript signals vs memory repo
-  reflect                       session-end reflection (wired as a Claude Stop hook; reads hook JSON on stdin)
+  reflect                       Stop hook: gated, saves learnings via a background judge (AMR_REFLECT=block prompts in-session)
   install [--host a,b|all]      wire hooks + rules + MCP into detected agent hosts
   uninstall [--host a,b|all]    remove amr hooks + rules + MCP entries
   serve                         stdio MCP server (memory_context/add/search/update)
 
 flags:
-  --project [name]              scope the entry to the current repo, or a named project
+  --project[=name]              scope the entry to the current repo, or a named project
   --also a,b                    attach extra projects to the context digest
   --file <topic>                write to a topic file instead of MEMORY.md
   --kind <k>                    add kind metadata (preference|fact|decision|howto)
   --cwd <dir>                   resolve project/host context against this dir
   --allow-secret                bypass secret-shape refusal
 `;
+
+// Flags that never take a value. Without this, `amr add --project "text"`
+// swallowed the entry text as the flag's value. --project scopes by name
+// only in the `--project=name` form.
+const BOOL_FLAGS = new Set([
+  'project', 'full', 'json', 'fix', 'compact', 'inline', 'spin',
+  'extract', 'no-log', 'allow-secret', 'if-stale-off',
+]);
 
 function parseFlags(argv) {
   const flags = {};
@@ -66,7 +80,11 @@ function parseFlags(argv) {
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       if (eq >= 0) flags[a.slice(2, eq)] = a.slice(eq + 1);
-      else if (i + 1 < argv.length && !argv[i + 1].startsWith('--'))
+      else if (
+        !BOOL_FLAGS.has(a.slice(2)) &&
+        i + 1 < argv.length &&
+        !argv[i + 1].startsWith('--')
+      )
         flags[a.slice(2)] = argv[++i];
       else flags[a.slice(2)] = true;
     } else pos.push(a);
@@ -147,6 +165,19 @@ export function main(argv) {
         return cmdCoverage(flags);
       case 'reflect':
         return cmdReflect();
+      case 'used':
+        return cmdUsed(pos);
+      case 'ids':
+        return cmdIds();
+      case 'supersede':
+        if (!pos[0]) {
+          process.stderr.write('usage: amr supersede <id> ["replacement text"]\n');
+          process.exitCode = 1;
+          return;
+        }
+        return cmdSupersede(pos[0], pos.slice(1).join(' '));
+      case 'reflect-run':
+        return cmdReflectRun(pos[0]);
       case 'install':
         return cmdInstall(flags);
       case 'uninstall':
